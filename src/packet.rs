@@ -52,7 +52,7 @@ impl SpoofTemplate {
 
         // IPv4 header constant part: ver/ihl, dscp/ecn=0, flags+frag, ttl/proto, ips
         let mut ip_const = 0u64;
-        ip_const += ((IPV4_VER_IHL as u64) << 8) | 0u64; // ver/ihl in high, dscp/ecn=0
+        ip_const += (IPV4_VER_IHL as u64) << 8; // ver/ihl in high, dscp/ecn=0 (low byte)
         ip_const += FLAGS_FRAG_DF as u64;
         ip_const += ((TTL as u64) << 8) | (PROTO_UDP as u64);
         ip_const = checksum::partial(&src_ip, ip_const);

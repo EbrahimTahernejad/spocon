@@ -1,15 +1,15 @@
 //! spocon-server — high-throughput Rust port of randconnect's server-side
 //! spoof path with spoofed source addresses on **both** legs:
 //!
-//!   * UPLINK   : spoofed UDP from the client arrives at `upstream-port`,
-//!                kernel doesn't care about source IP. We forward the
-//!                payload as plain UDP to `--h-out` (the real KCP/QUIC/...
-//!                server) over a connected ephemeral UDP socket.
+//! * UPLINK: spoofed UDP from the client arrives at `upstream-port`,
+//!   kernel doesn't care about source IP. We forward the payload as
+//!   plain UDP to `--h-out` (the real KCP/QUIC/... server) over a
+//!   connected ephemeral UDP socket.
 //!
-//!   * DOWNLINK : replies from `--h-out` are read off that same ephemeral
-//!                socket, wrapped in a fresh IPv4+UDP header with
-//!                src=`--spoof-src` and dst=`--client`, and pushed out a
-//!                raw `IP_HDRINCL` socket via `sendmmsg`.
+//! * DOWNLINK: replies from `--h-out` are read off that same ephemeral
+//!   socket, wrapped in a fresh IPv4+UDP header with `src=--spoof-src`
+//!   and `dst=--client`, and pushed out a raw `IP_HDRINCL` socket via
+//!   `sendmmsg`.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -197,7 +197,6 @@ fn main() -> io::Result<()> {
         let bufsize = args.bufsize;
         let no_csum = args.no_udp_csum;
         let ip_id = ip_id.clone();
-        let template = template;
         let spoof_src = args.spoof_src;
         let client = args.client;
         thread::Builder::new()

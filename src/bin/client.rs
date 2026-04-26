@@ -1,12 +1,12 @@
 //! spocon-client — Rust port of randconnect's client-side spoof path with
 //! spoofed source addresses on **both** legs:
 //!
-//!   * UPLINK   : payloads from the local app are wrapped in an IPv4+UDP
-//!                header with src=`--spoof-src` and dst=`--server` and
-//!                pushed out a raw `IP_HDRINCL` socket via `sendmmsg`.
+//! * UPLINK: payloads from the local app are wrapped in an IPv4+UDP
+//!   header with `src=--spoof-src` and `dst=--server` and pushed out
+//!   a raw `IP_HDRINCL` socket via `sendmmsg`.
 //!
-//!   * DOWNLINK : spoofed UDP arriving on `--wan-port` is forwarded as
-//!                plain UDP back to the most-recently-seen local-app peer.
+//! * DOWNLINK: spoofed UDP arriving on `--wan-port` is forwarded as
+//!   plain UDP back to the most-recently-seen local-app peer.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -139,7 +139,6 @@ fn main() -> io::Result<()> {
         let bufsize = args.bufsize;
         let no_csum = args.no_udp_csum;
         let ip_id = ip_id.clone();
-        let template = template;
         let last_local = last_local.clone();
         let spoof_src = args.spoof_src;
         let server = args.server;
