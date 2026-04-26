@@ -1,6 +1,6 @@
 [package]
 name = "spocon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "High-throughput UDP relay with spoofed source addresses on both upstream and downstream legs (Rust port of randconnect's spoof path)"
 license = "MIT OR Apache-2.0"
