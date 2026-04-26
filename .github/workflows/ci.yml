@@ -44,9 +44,11 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
+            apt:    musl-tools
             cc:     musl-gcc
           - target: aarch64-unknown-linux-musl
-            cc:     aarch64-linux-musl-gcc
+            apt:    gcc-aarch64-linux-gnu
+            cc:     aarch64-linux-gnu-gcc
 
     steps:
       - uses: actions/checkout@v4
@@ -60,24 +62,25 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: install x86_64 musl toolchain
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: install aarch64 musl cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | sudo tar -xz -C /opt
-          echo "/opt/aarch64-linux-musl-cross/bin" >> "$GITHUB_PATH"
+      # The aarch64 musl cross toolchain comes from Ubuntu's apt, not
+      # musl.cc — that mirror frequently times out from GitHub-hosted
+      # runners. rustc supplies the musl crt + libc.a from rust-std, so
+      # an `-linux-gnu-` linker is fine for producing a static binary
+      # (works with `panic = "abort"` which removes the libgcc unwind
+      # dependency).
+      - name: install cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
 
       - name: build static release binaries
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.cc }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.cc }}
+          CC_x86_64_unknown_linux_musl: ${{ matrix.cc }}
+          CC_aarch64_unknown_linux_musl: ${{ matrix.cc }}
         run: |
           cargo build --release --target ${{ matrix.target }}
-          file  target/${{ matrix.target }}/release/spocon-server
-          file  target/${{ matrix.target }}/release/spocon-client
+          file target/${{ matrix.target }}/release/spocon-server
+          file target/${{ matrix.target }}/release/spocon-client
 
       - name: upload build artifact
         uses: actions/upload-artifact@v4
