@@ -127,13 +127,31 @@ port, writes a systemd unit, and starts the service. Re-running it
 remembers the previous answers (defaults pulled from
 `/etc/spocon/<role>.env`).
 
-```bash
-# latest release
-bash <(curl -fsSL https://raw.githubusercontent.com/ebrahimtahernejad/spocon/main/install.sh)
+Latest release:
 
-# pinned release
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ebrahimtahernejad/spocon/main/install.sh)
+```
+
+Pinned release:
+
+```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ebrahimtahernejad/spocon/main/install.sh) v0.1.1
 ```
+
+Offline (tarball already on disk; no GitHub access needed beyond
+fetching the script itself):
+
+```bash
+sudo ./install.sh ./spocon-0.1.1-x86_64-unknown-linux-musl.tar.gz
+```
+
+The first positional argument is auto-detected: if it points at an
+existing file on disk it's treated as an **offline tarball**; otherwise
+it's treated as a release tag (`latest` if omitted). The tarball can be
+in the GitHub-release layout (`spocon-<ver>-<target>/spocon-{server,client}`)
+or any layout that contains `spocon-server` and `spocon-client`
+somewhere inside.
 
 The installer's interactive flow is **install → uninstall → re-install**
 on the top menu, then for `install` it walks through:
@@ -142,7 +160,11 @@ on the top menu, then for `install` it walks through:
 2. pipe speed (1 / 2 / 5 / 10 Gbps, custom Mbps, or auto-detect via
    `speedtest-cli`) — picks the matching `--batch / --rcvbuf / --sndbuf`
    tier,
-3. role-specific connection params (`--upstream-port`, `--h-out`,
+3. whether to disable the kernel's `rp_filter` (required for
+   spoofed-source UDP to be accepted; the original per-interface values
+   are snapshotted to `/etc/spocon/rp_filter.snapshot` and restored on
+   uninstall),
+4. role-specific connection params (`--upstream-port`, `--h-out`,
    `--spoof-src`, `--client` / `--local-in`, `--server`, `--wan-port`).
 
 After install:

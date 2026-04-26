@@ -2,11 +2,20 @@
 # -----------------------------------------------------------------------------
 # spocon installer
 #
+#   # Online (default): pull latest release from GitHub
 #   bash <(curl -fsSL https://raw.githubusercontent.com/ebrahimtahernejad/spocon/main/install.sh)
+#
+#   # Online, pinned to a specific release tag
 #   bash <(curl -fsSL https://raw.githubusercontent.com/ebrahimtahernejad/spocon/main/install.sh) v0.1.1
 #
+#   # Offline: use a tarball already present on disk (no network needed
+#   # beyond reaching this script). The arg is auto-detected as a file
+#   # path if it exists on disk; otherwise it's treated as a release tag.
+#   sudo ./install.sh ./spocon-0.1.1-x86_64-unknown-linux-musl.tar.gz
+#
 # - Downloads the static x86_64 / aarch64 musl binary from the GitHub
-#   release matching the optional `[tag]` argument (default: latest).
+#   release matching the optional `[tag]` argument (default: latest), or
+#   uses a local tarball when one is passed in.
 # - Asks role (server / client), pipe speed, and connection params.
 # - Tunes sysctls, drops conntrack on the relay port, writes a systemd
 #   unit, and starts the service.
@@ -21,7 +30,23 @@ set -euo pipefail
 
 # ---- config ------------------------------------------------------------------
 REPO="${SPOCON_REPO:-ebrahimtahernejad/spocon}"
-TAG="${1:-latest}"
+
+# First arg is either:
+#   - a path to a local .tar.gz (offline install), OR
+#   - a release tag like `v0.1.1` / `latest` (online install).
+# The two are disambiguated by checking whether the arg points at an
+# existing file on disk.
+ARG1="${1:-}"
+LOCAL_TARBALL=""
+if [[ -n "$ARG1" && -f "$ARG1" ]]; then
+    LOCAL_TARBALL=$(readlink -f -- "$ARG1")
+    TAG="offline"
+elif [[ "$ARG1" == */* || "$ARG1" == *.tar.gz || "$ARG1" == *.tgz ]]; then
+    printf '\033[1;31mTarball not found: %s\033[0m\n' "$ARG1" >&2
+    exit 1
+else
+    TAG="${ARG1:-latest}"
+fi
 
 INSTALL_DIR=/usr/local/bin
 SERVICE_DIR=/etc/systemd/system
@@ -68,18 +93,43 @@ resolve_tag() {
     say "Using release: $TAG"
 }
 
-download_binaries() {
-    local target=$1
-    local ver=${TAG#v}
-    local tarball="spocon-$ver-$target.tar.gz"
-    local url="https://github.com/$REPO/releases/download/$TAG/$tarball"
-    say "Downloading $url"
+# Install the two binaries. In offline mode (`LOCAL_TARBALL` set) the
+# tarball is taken from disk; otherwise we fetch it from the release
+# matching `$TAG` for the current architecture.
+install_binaries() {
     local tmp; tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' RETURN
-    curl -fsSL "$url" -o "$tmp/$tarball" || { err "Download failed: $url"; exit 1; }
-    tar -xzf "$tmp/$tarball" -C "$tmp"
-    install -m 755 "$tmp"/spocon-*/spocon-server "$INSTALL_DIR/spocon-server"
-    install -m 755 "$tmp"/spocon-*/spocon-client "$INSTALL_DIR/spocon-client"
+    local archive=""
+
+    if [[ -n "$LOCAL_TARBALL" ]]; then
+        say "Installing from local tarball: $LOCAL_TARBALL"
+        archive="$LOCAL_TARBALL"
+    else
+        local target; target=$(detect_arch)
+        resolve_tag
+        local ver=${TAG#v}
+        local fname="spocon-$ver-$target.tar.gz"
+        local url="https://github.com/$REPO/releases/download/$TAG/$fname"
+        say "Downloading $url"
+        curl -fsSL "$url" -o "$tmp/$fname" || { err "Download failed: $url"; exit 1; }
+        archive="$tmp/$fname"
+    fi
+
+    tar -xzf "$archive" -C "$tmp" || { err "Failed to extract tarball: $archive"; exit 1; }
+
+    # Locate the binaries anywhere inside the extracted tree so we accept
+    # both the GitHub release layout (spocon-<ver>-<target>/spocon-*) and
+    # any flat or differently-named user-built tarball.
+    local sb cb
+    sb=$(find "$tmp" -type f -name spocon-server -print -quit)
+    cb=$(find "$tmp" -type f -name spocon-client -print -quit)
+    [[ -n "$sb" && -n "$cb" ]] || {
+        err "Tarball does not contain spocon-server / spocon-client binaries"
+        exit 1
+    }
+
+    install -m 755 "$sb" "$INSTALL_DIR/spocon-server"
+    install -m 755 "$cb" "$INSTALL_DIR/spocon-client"
     ok "Binaries installed to $INSTALL_DIR/spocon-{server,client}"
 }
 
@@ -428,9 +478,7 @@ do_install() {
     choose_role
     choose_speed
     choose_rp_filter
-    local target; target=$(detect_arch)
-    resolve_tag
-    download_binaries "$target"
+    install_binaries
     case "$ROLE" in
         server) install_server ;;
         client) install_client ;;
@@ -481,9 +529,15 @@ do_reinstall() {
 
 main() {
     require_root
+    local source_line
+    if [[ -n "$LOCAL_TARBALL" ]]; then
+        source_line="offline tarball: $(basename "$LOCAL_TARBALL")"
+    else
+        source_line="$REPO @ $TAG"
+    fi
     cat <<EOF
 ═══════════════════════════════════════════════
-  spocon installer  ($REPO @ $TAG)
+  spocon installer  ($source_line)
 ═══════════════════════════════════════════════
   1) Install
   2) Uninstall
