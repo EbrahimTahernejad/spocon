@@ -1,0 +1,178 @@
+name: release
+
+# Triggered on every push to main; the first job inspects whether
+# `version =` in Cargo.toml differs from the previous commit. If yes,
+# a tag `v<version>` is created and a GitHub Release is published with
+# the static x86_64 + aarch64 musl binaries attached.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force a release with the current Cargo.toml version"
+        required: false
+        default: "false"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: write   # needed to create tags and releases
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect a Cargo.toml `version =` change between the previous commit and
+  # this commit. Output `release=true` if a release should be cut, plus the
+  # version string.
+  # ---------------------------------------------------------------------------
+  detect:
+    name: detect version bump
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+      tag:     ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # need HEAD~1 to diff Cargo.toml
+
+      - name: extract versions and decide
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          extract() { grep -E '^[[:space:]]*version[[:space:]]*=' "$1" \
+                       | head -n1 | sed -E 's/.*"([^"]+)".*/\1/'; }
+
+          new=$(extract Cargo.toml)
+          old=$(git show HEAD~1:Cargo.toml 2>/dev/null | grep -E '^[[:space:]]*version[[:space:]]*=' \
+                 | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+
+          echo "current  Cargo.toml version: ${new:-<unset>}"
+          echo "previous Cargo.toml version: ${old:-<none>}"
+
+          force="${{ github.event.inputs.force }}"
+          if [ "${force:-false}" = "true" ] || { [ -n "$new" ] && [ "$new" != "$old" ]; }; then
+            echo "release=true"  >> "$GITHUB_OUTPUT"
+            echo "version=$new"  >> "$GITHUB_OUTPUT"
+            echo "tag=v$new"     >> "$GITHUB_OUTPUT"
+            echo "==> will release v$new"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "==> no version bump, skipping release"
+          fi
+
+      - name: abort if tag already exists
+        if: steps.check.outputs.release == 'true'
+        run: |
+          if git rev-parse "refs/tags/${{ steps.check.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::tag ${{ steps.check.outputs.tag }} already exists"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build statically-linked musl binaries for x86_64 and aarch64.
+  # ---------------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.target }})
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            cc:     musl-gcc
+          - target: aarch64-unknown-linux-musl
+            cc:     aarch64-linux-musl-gcc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-release
+
+      - name: install x86_64 musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: install aarch64 musl cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | sudo tar -xz -C /opt
+          echo "/opt/aarch64-linux-musl-cross/bin" >> "$GITHUB_PATH"
+
+      - name: build static release binaries
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.cc }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.cc }}
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          file target/${{ matrix.target }}/release/spocon-server
+          file target/${{ matrix.target }}/release/spocon-client
+
+      - name: package
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ needs.detect.outputs.version }}"
+          dir="spocon-${ver}-${{ matrix.target }}"
+          mkdir -p "dist/$dir"
+          cp target/${{ matrix.target }}/release/spocon-server "dist/$dir/"
+          cp target/${{ matrix.target }}/release/spocon-client "dist/$dir/"
+          cp README.md "dist/$dir/" || true
+          ( cd dist && tar -czf "$dir.tar.gz" "$dir" \
+                  && sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256" \
+                  && rm -rf "$dir" )
+          echo "tar=dist/$dir.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "sha=dist/$dir.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Tag the commit and publish a GitHub Release with all matrix tarballs.
+  # ---------------------------------------------------------------------------
+  release:
+    name: github release
+    needs: [detect, build]
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: list artifacts
+        run: ls -la dist
+
+      - name: create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:  ${{ needs.detect.outputs.tag }}
+          name:      ${{ needs.detect.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256

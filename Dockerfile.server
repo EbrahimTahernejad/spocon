@@ -1,0 +1,14 @@
+FROM rust:1-alpine AS builder
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
+COPY src ./src
+# Inside the alpine builder cc is already musl-native, so override the
+# `linker = "musl-gcc"` from .cargo/config.toml.
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=cc
+RUN cargo build --release --bin spocon-server --target x86_64-unknown-linux-musl
+
+FROM scratch
+COPY --from=builder /src/target/x86_64-unknown-linux-musl/release/spocon-server /spocon-server
+ENTRYPOINT ["/spocon-server"]

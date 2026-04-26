@@ -1,0 +1,16 @@
+[target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
+# Force a fully-static, non-PIE binary. Rust 1.x defaults to static-PIE on
+# musl which can segfault at startup on some toolchains; `relocation-model=static`
+# disables PIE so the resulting ELF is plain `EXEC` with zero NEEDED entries
+# and runs under `FROM scratch`.
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "relocation-model=static",
+    "-C", "link-arg=-no-pie",
+]
+
+[build]
+# Native development build (cargo build / cargo test) stays glibc-dynamic so
+# you don't need musl-tools locally. For shipping use:
+#   cargo build --release --target x86_64-unknown-linux-musl

@@ -1,0 +1,11 @@
+# Rust build artefacts
+/target
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local-only env
+.env

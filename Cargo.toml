@@ -1,0 +1,31 @@
+[package]
+name = "spocon"
+version = "0.1.0"
+edition = "2021"
+description = "High-throughput UDP relay with spoofed source addresses on both upstream and downstream legs (Rust port of randconnect's spoof path)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "spocon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spocon-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "spocon-client"
+path = "src/bin/client.rs"
+
+[dependencies]
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+overflow-checks = false
