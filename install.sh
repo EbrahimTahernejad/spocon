@@ -27,6 +27,14 @@ INSTALL_DIR=/usr/local/bin
 SERVICE_DIR=/etc/systemd/system
 SYSCTL_FILE=/etc/sysctl.d/99-spocon.conf
 CONFIG_DIR=/etc/spocon
+RP_SNAPSHOT=$CONFIG_DIR/rp_filter.snapshot
+
+# Markers used to delimit any block we write into a *shared* config file
+# (sysctl drop-in, /etc/sysctl.conf if we ever fall back to it, etc.) so
+# that an uninstall / re-install can excise just our lines without
+# clobbering anything the user added themselves.
+MARK_BEGIN="# >>> spocon installer >>>"
+MARK_END="# <<< spocon installer <<<"
 
 # Make stdin point to the controlling tty even when launched via
 # `bash <(curl ...)` or `curl ... | bash`.
@@ -85,6 +93,21 @@ prompt() {
         while [[ -z "${input:-}" ]]; do read -rp "  $q: " input || true; done
         printf -v "$var" '%s' "$input"
     fi
+}
+
+# yes/no prompt; default Y if def="y", default N if def="n"
+prompt_yesno() {
+    local var=$1 q=$2 def=${3:-y} a=""
+    local hint="[Y/n]"
+    [[ "$def" == "n" ]] && hint="[y/N]"
+    while :; do
+        read -rp "  $q $hint: " a || true
+        a=${a:-$def}
+        case "${a,,}" in
+            y|yes) printf -v "$var" '%s' "1"; return 0 ;;
+            n|no)  printf -v "$var" '%s' "0"; return 0 ;;
+        esac
+    done
 }
 
 choose_role() {
@@ -160,23 +183,126 @@ derive_tuning() {
     fi
 }
 
+# ---- marked-block helpers ----------------------------------------------------
+# Apply / replace a `MARK_BEGIN .. MARK_END` block inside an arbitrary
+# file. If the file doesn't exist or has no marker, the block is created
+# (or appended). Otherwise the existing block is replaced in place. Any
+# lines outside the markers are preserved verbatim.
+apply_marked_block() {
+    local file=$1 body=$2
+    mkdir -p "$(dirname "$file")"
+    if [[ ! -f "$file" ]] || ! grep -qF "$MARK_BEGIN" "$file" 2>/dev/null; then
+        {
+            [[ -f "$file" ]] && { cat "$file"; echo; }
+            echo "$MARK_BEGIN"
+            echo "# Managed by the spocon installer. Remove these lines (or run"
+            echo "# the uninstaller) to revert. Do not edit between the markers."
+            echo "$body"
+            echo "$MARK_END"
+        } >"$file.tmp"
+        mv "$file.tmp" "$file"
+    else
+        awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v body="$body" '
+            $0 == b { print; print "# Managed by the spocon installer. Remove these lines (or run";
+                       print "# the uninstaller) to revert. Do not edit between the markers.";
+                       print body; skip=1; next }
+            $0 == e { skip=0; print; next }
+            !skip   { print }
+        ' "$file" >"$file.tmp"
+        mv "$file.tmp" "$file"
+    fi
+}
+
+# Remove the spocon-marked block (and the markers themselves) from a
+# file. If the file ends up empty, delete it.
+remove_marked_block() {
+    local file=$1
+    [[ -f "$file" ]] || return 0
+    awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+        $0 == b { skip=1; next }
+        $0 == e { skip=0; next }
+        !skip   { print }
+    ' "$file" | sed -e '$ { /^$/d }' >"$file.tmp"
+    if [[ -s "$file.tmp" ]]; then
+        mv "$file.tmp" "$file"
+    else
+        rm -f "$file" "$file.tmp"
+    fi
+}
+
+# ---- rp_filter snapshot / restore --------------------------------------------
+# Snapshot every interface's current rp_filter value to RP_SNAPSHOT *the
+# first time*. Subsequent installs leave the snapshot untouched so the
+# uninstaller can always revert all the way back to the user's original
+# kernel state.
+snapshot_rp_filter() {
+    [[ -f "$RP_SNAPSHOT" ]] && return 0
+    mkdir -p "$CONFIG_DIR"
+    : >"$RP_SNAPSHOT"
+    for f in /proc/sys/net/ipv4/conf/*/rp_filter; do
+        [[ -r "$f" ]] || continue
+        local iface; iface=$(basename "$(dirname "$f")")
+        echo "${iface}=$(cat "$f")" >>"$RP_SNAPSHOT"
+    done
+    chmod 600 "$RP_SNAPSHOT"
+}
+
+restore_rp_filter() {
+    [[ -f "$RP_SNAPSHOT" ]] || return 0
+    while IFS='=' read -r iface val; do
+        [[ -z "$iface" ]] && continue
+        echo "$val" >"/proc/sys/net/ipv4/conf/$iface/rp_filter" 2>/dev/null || true
+    done <"$RP_SNAPSHOT"
+    rm -f "$RP_SNAPSHOT"
+}
+
 # ---- system tuning -----------------------------------------------------------
+choose_rp_filter() {
+    cat <<EOF
+
+Disable kernel reverse-path filter (rp_filter) on this host?
+  Spoofed-source UDP is exactly what rp_filter is built to drop. Without
+  rp_filter=0, spocon's spoofed packets will be silently discarded by
+  the kernel and the tunnel will not move traffic.
+  The original values are snapshotted to $RP_SNAPSHOT and restored on
+  uninstall.
+EOF
+    prompt_yesno RP_FILTER_OFF "Disable rp_filter (recommended for spocon)?" y
+    if [[ "$RP_FILTER_OFF" != "1" ]]; then
+        warn "rp_filter left enabled — spocon will most likely drop traffic."
+        warn "If you change your mind later, re-run the installer."
+    fi
+}
+
 write_sysctl() {
     local m=$((SOCKBUF * 4))
     [[ $m -lt 67108864 ]] && m=67108864    # at least 64 MiB
-    cat >"$SYSCTL_FILE" <<EOF
-# spocon installer (auto-generated, safe to edit)
-net.core.rmem_max = $m
+
+    local body
+    body="net.core.rmem_max = $m
 net.core.wmem_max = $m
 net.core.netdev_max_backlog = 300000
-net.core.optmem_max = 4194304
-# rp_filter drops packets whose source isn't reverse-routable through the
-# arrival interface — exactly the property we violate by spoofing.
+net.core.optmem_max = 4194304"
+
+    if [[ "${RP_FILTER_OFF:-1}" == "1" ]]; then
+        snapshot_rp_filter
+        body="$body
+# rp_filter drops packets whose source isn't reverse-routable through
+# the arrival interface — exactly the property we violate by spoofing.
 net.ipv4.conf.all.rp_filter = 0
-net.ipv4.conf.default.rp_filter = 0
-EOF
+net.ipv4.conf.default.rp_filter = 0"
+        for f in /proc/sys/net/ipv4/conf/*/rp_filter; do
+            [[ -w "$f" ]] || continue
+            local iface; iface=$(basename "$(dirname "$f")")
+            [[ "$iface" == "all" || "$iface" == "default" ]] && continue
+            body="$body
+net.ipv4.conf.${iface}.rp_filter = 0"
+            echo 0 >"$f" 2>/dev/null || true
+        done
+    fi
+
+    apply_marked_block "$SYSCTL_FILE" "$body"
     sysctl --system >/dev/null
-    for f in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 0 >"$f" 2>/dev/null || true; done
     ok "Sysctls written → $SYSCTL_FILE"
 }
 
@@ -234,7 +360,7 @@ EOF
 install_server() {
     say ""; say "=== spocon-server params ==="
     local env=$CONFIG_DIR/server.env
-    # shellcheck disable=SC1090
+    # shellcheck disable=SC1090,SC2015
     [[ -f "$env" ]] && source "$env" 2>/dev/null || true
 
     prompt UPSTREAM_PORT  "Upstream listen port (UDP)"               "${UPSTREAM_PORT:-51820}"
@@ -250,7 +376,8 @@ install_server() {
         "SERVER_IP=$SERVER_IP" \
         "CLIENT_IP=$CLIENT_IP" \
         "CLIENT_WAN=$CLIENT_WAN" \
-        "SPEED=$SPEED" "BATCH=$BATCH" "BUFSIZE=$BUFSIZE" "SOCKBUF=$SOCKBUF"
+        "SPEED=$SPEED" "BATCH=$BATCH" "BUFSIZE=$BUFSIZE" "SOCKBUF=$SOCKBUF" \
+        "RP_FILTER_OFF=${RP_FILTER_OFF:-1}"
 
     local args="--upstream-port ${UPSTREAM_PORT} \
 --h-out ${H_OUT} \
@@ -265,7 +392,7 @@ install_server() {
 install_client() {
     say ""; say "=== spocon-client params ==="
     local env=$CONFIG_DIR/client.env
-    # shellcheck disable=SC1090
+    # shellcheck disable=SC1090,SC2015
     [[ -f "$env" ]] && source "$env" 2>/dev/null || true
 
     prompt LOCAL_IN     "Local app listen ip:port (--local-in)"               "${LOCAL_IN:-127.0.0.1:5000}"
@@ -281,7 +408,8 @@ install_client() {
         "SERVER_PORT=$SERVER_PORT" \
         "CLIENT_IP=$CLIENT_IP" \
         "WAN_PORT=$WAN_PORT" \
-        "SPEED=$SPEED" "BATCH=$BATCH" "BUFSIZE=$BUFSIZE" "SOCKBUF=$SOCKBUF"
+        "SPEED=$SPEED" "BATCH=$BATCH" "BUFSIZE=$BUFSIZE" "SOCKBUF=$SOCKBUF" \
+        "RP_FILTER_OFF=${RP_FILTER_OFF:-1}"
 
     local args="--local-in ${LOCAL_IN} \
 --server ${SERVER_IP}:${SERVER_PORT} \
@@ -299,6 +427,7 @@ do_install() {
     hr; say "spocon installer"; hr
     choose_role
     choose_speed
+    choose_rp_filter
     local target; target=$(detect_arch)
     resolve_tag
     download_binaries "$target"
@@ -322,9 +451,21 @@ do_uninstall() {
     done
     systemctl daemon-reload
     rm -f "$INSTALL_DIR/spocon-server" "$INSTALL_DIR/spocon-client"
-    rm -f "$SYSCTL_FILE"
-    rm -rf "$CONFIG_DIR"
+
+    # Strip our marker block out of the sysctl drop-in. The drop-in is
+    # the only shared system file we touch today, but the helper works
+    # for any file we might modify later (sysctl.conf, sysctl.d/*, etc).
+    remove_marked_block "$SYSCTL_FILE"
+
+    # Restore every interface's rp_filter to the value we snapshotted
+    # before turning it off — kernels keep runtime values in /proc even
+    # after a drop-in is removed, so an explicit restore is required.
+    restore_rp_filter
+
     sysctl --system >/dev/null 2>&1 || true
+
+    rm -rf "$CONFIG_DIR"
+
     # The systemd `ExecStopPost` should already have removed the iptables
     # NOTRACK rules, but flush again defensively if iptables exists.
     if command -v iptables >/dev/null; then
