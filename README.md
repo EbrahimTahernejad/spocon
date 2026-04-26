@@ -119,6 +119,41 @@ echo $(printf 'ffff%.0s' {1..16}) | sudo tee /sys/class/net/eth0/queues/rx-*/rps
 5. **Hysteria `bandwidth.up/down`** must be ≥ what you actually want;
    Brutal CC won't exceed the configured cap.
 
+## Install (one-liner)
+
+The installer downloads the static x86_64 / aarch64 musl binary from the
+matching GitHub release, tunes sysctls + drops conntrack on the relay
+port, writes a systemd unit, and starts the service. Re-running it
+remembers the previous answers (defaults pulled from
+`/etc/spocon/<role>.env`).
+
+```bash
+# latest release
+bash <(curl -fsSL https://raw.githubusercontent.com/ebrahimtahernejad/spocon/main/install.sh)
+
+# pinned release
+bash <(curl -fsSL https://raw.githubusercontent.com/ebrahimtahernejad/spocon/main/install.sh) v0.1.1
+```
+
+The installer's interactive flow is **install → uninstall → re-install**
+on the top menu, then for `install` it walks through:
+
+1. role (server / client),
+2. pipe speed (1 / 2 / 5 / 10 Gbps, custom Mbps, or auto-detect via
+   `speedtest-cli`) — picks the matching `--batch / --rcvbuf / --sndbuf`
+   tier,
+3. role-specific connection params (`--upstream-port`, `--h-out`,
+   `--spoof-src`, `--client` / `--local-in`, `--server`, `--wan-port`).
+
+After install:
+
+```bash
+systemctl status spocon-server          # or spocon-client
+journalctl -u   spocon-server -f
+cat /etc/spocon/server.env              # remembered config
+```
+
+
 ## Build
 
 ### Dynamic glibc build (development)
