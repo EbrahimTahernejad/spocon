@@ -1,9 +1,6 @@
 # spocon
 
-High-throughput Rust port of the spoof path of [randconnect](../).
-
-Unlike the Go original, **both** legs of the tunnel use spoofed source
-addresses on raw IPv4 sockets:
+High-throughput Rust src ip spoofing solution.
 
 ```
 local-app  ──UDP──>  spocon-client  ──RAW IP (src=spoof_src)──>  spocon-server  ──UDP──>  h_out
