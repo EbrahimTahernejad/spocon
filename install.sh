@@ -413,26 +413,48 @@ install_server() {
     # shellcheck disable=SC1090,SC2015
     [[ -f "$env" ]] && source "$env" 2>/dev/null || true
 
-    prompt UPSTREAM_PORT  "Upstream listen port (UDP)"               "${UPSTREAM_PORT:-51820}"
-    prompt H_OUT          "Hysteria backend ip:port (--h-out)"       "${H_OUT:-}"
-    prompt SERVER_IP      "This box's public IP (--spoof-src ip)"    "${SERVER_IP:-}"
-    prompt CLIENT_IP      "Client public IP (--client ip)"           "${CLIENT_IP:-}"
-    prompt CLIENT_WAN     "Client WAN port (--client port)"          "${CLIENT_WAN:-$UPSTREAM_PORT}"
+    # Backward-compat: derive new combined defaults from older split env
+    # (CLIENT_IP + CLIENT_WAN, SERVER_IP) if a previous installer wrote
+    # them.
+    : "${CLIENT:=${CLIENT_IP:+${CLIENT_IP}:${CLIENT_WAN:-$UPSTREAM_PORT}}}"
+    : "${SPOOF_SRC:=${SERVER_IP:+${SERVER_IP}:${UPSTREAM_PORT:-51820}}}"
+
+    prompt UPSTREAM_PORT  "Upstream listen port (UDP)"                          "${UPSTREAM_PORT:-51820}"
+    prompt H_OUT          "Hysteria backend host:port (--h-out, IP or DNS)"     "${H_OUT:-}"
+    prompt CLIENT         "Client public host:port (--client; port = client's --wan-port)" "${CLIENT:-}"
+
+    cat <<EOF
+
+  Source spoofing wraps every reply in an IPv4+UDP header with a
+  spoofed src= so the client sees traffic as if it came from that IP.
+  Disabling sends plain UDP from --upstream-port (no raw socket needed,
+  no CAP_NET_RAW required) — pick this if the path doesn't need
+  spoofing or this box can't open raw sockets.
+EOF
+    prompt_yesno SPOOF_ON "Enable source spoofing (downlink to client)?" y
+
+    local spoof_arg=""
+    if [[ "$SPOOF_ON" == "1" ]]; then
+        prompt SPOOF_SRC  "Spoof src host:port (--spoof-src; usually this box's public IP:$UPSTREAM_PORT)" "${SPOOF_SRC:-}"
+        spoof_arg="--spoof-src ${SPOOF_SRC}"
+    else
+        SPOOF_SRC=""
+    fi
 
     write_sysctl
     write_env_file "$env" \
         "UPSTREAM_PORT=$UPSTREAM_PORT" \
         "H_OUT=$H_OUT" \
-        "SERVER_IP=$SERVER_IP" \
-        "CLIENT_IP=$CLIENT_IP" \
-        "CLIENT_WAN=$CLIENT_WAN" \
+        "CLIENT=$CLIENT" \
+        "SPOOF_SRC=$SPOOF_SRC" \
+        "SPOOF_ON=${SPOOF_ON:-0}" \
         "SPEED=$SPEED" "BATCH=$BATCH" "BUFSIZE=$BUFSIZE" "SOCKBUF=$SOCKBUF" \
         "RP_FILTER_OFF=${RP_FILTER_OFF:-1}"
 
     local args="--upstream-port ${UPSTREAM_PORT} \
 --h-out ${H_OUT} \
---spoof-src ${SERVER_IP}:${UPSTREAM_PORT} \
---client ${CLIENT_IP}:${CLIENT_WAN} \
+--client ${CLIENT} \
+${spoof_arg} \
 --batch ${BATCH} --bufsize ${BUFSIZE} \
 --rcvbuf ${SOCKBUF} --sndbuf ${SOCKBUF} \
 --no-udp-csum"
@@ -445,26 +467,44 @@ install_client() {
     # shellcheck disable=SC1090,SC2015
     [[ -f "$env" ]] && source "$env" 2>/dev/null || true
 
-    prompt LOCAL_IN     "Local app listen ip:port (--local-in)"               "${LOCAL_IN:-127.0.0.1:5000}"
-    prompt SERVER_IP    "Server public IP (--server ip)"                      "${SERVER_IP:-}"
-    prompt SERVER_PORT  "Server port (--server port)"                         "${SERVER_PORT:-51820}"
-    prompt CLIENT_IP    "This box's public IP (--spoof-src ip)"               "${CLIENT_IP:-}"
-    prompt WAN_PORT     "WAN listen port (must equal server's --client port)" "${WAN_PORT:-$SERVER_PORT}"
+    : "${SERVER:=${SERVER_IP:+${SERVER_IP}:${SERVER_PORT:-51820}}}"
+    : "${SPOOF_SRC:=${CLIENT_IP:+${CLIENT_IP}:${WAN_PORT:-51820}}}"
+
+    prompt LOCAL_IN     "Local app listen ip:port (--local-in)"                   "${LOCAL_IN:-127.0.0.1:5000}"
+    prompt SERVER       "Server host:port (--server, IP or DNS)"                  "${SERVER:-}"
+    prompt WAN_PORT     "WAN listen port (must equal server's --client port)"     "${WAN_PORT:-${SERVER##*:}}"
+
+    cat <<EOF
+
+  Source spoofing wraps every uplink in an IPv4+UDP header with a
+  spoofed src= so the server sees traffic as if it came from that IP.
+  Disabling sends plain UDP from the wan-port socket (no raw socket
+  needed, no CAP_NET_RAW required).
+EOF
+    prompt_yesno SPOOF_ON "Enable source spoofing (uplink to server)?" y
+
+    local spoof_arg=""
+    if [[ "$SPOOF_ON" == "1" ]]; then
+        prompt SPOOF_SRC "Spoof src host:port (--spoof-src; usually this box's public IP:$WAN_PORT)" "${SPOOF_SRC:-}"
+        spoof_arg="--spoof-src ${SPOOF_SRC}"
+    else
+        SPOOF_SRC=""
+    fi
 
     write_sysctl
     write_env_file "$env" \
         "LOCAL_IN=$LOCAL_IN" \
-        "SERVER_IP=$SERVER_IP" \
-        "SERVER_PORT=$SERVER_PORT" \
-        "CLIENT_IP=$CLIENT_IP" \
+        "SERVER=$SERVER" \
         "WAN_PORT=$WAN_PORT" \
+        "SPOOF_SRC=$SPOOF_SRC" \
+        "SPOOF_ON=${SPOOF_ON:-0}" \
         "SPEED=$SPEED" "BATCH=$BATCH" "BUFSIZE=$BUFSIZE" "SOCKBUF=$SOCKBUF" \
         "RP_FILTER_OFF=${RP_FILTER_OFF:-1}"
 
     local args="--local-in ${LOCAL_IN} \
---server ${SERVER_IP}:${SERVER_PORT} \
---spoof-src ${CLIENT_IP}:${WAN_PORT} \
+--server ${SERVER} \
 --wan-port ${WAN_PORT} \
+${spoof_arg} \
 --batch ${BATCH} --bufsize ${BUFSIZE} \
 --rcvbuf ${SOCKBUF} --sndbuf ${SOCKBUF} \
 --no-udp-csum"

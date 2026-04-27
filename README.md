@@ -12,6 +12,17 @@ The hot path is a tight `recvmmsg(2)` → build IP+UDP in place →
 `sendmmsg(2)` loop with pre-allocated buffers, no allocations per packet,
 and one dedicated thread per direction.
 
+`--spoof-src` is **optional**, on either side independently. If omitted,
+that direction is sent as plain UDP from the wan-port (client) /
+upstream-port (server) socket — no raw socket, no `IP_HDRINCL`, no
+`CAP_NET_RAW`. Useful when one leg of the path doesn't need spoofing
+or when the box can't open raw sockets.
+
+`--server`, `--h-out`, `--client`, and `--spoof-src` accept either an
+IP literal (`1.2.3.4:51820`) or a hostname (`relay.example.com:51820`).
+DNS is resolved exactly once at startup; the relay then operates on the
+resolved address forever — no per-packet lookups, no surprise stalls.
+
 ## Performance knobs
 
 * `--batch <N>`           — `recvmmsg` / `sendmmsg` batch size (default 64).

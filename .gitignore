@@ -9,3 +9,6 @@
 
 # Local-only env
 .env
+
+# E2E test harness output
+/tests/logs/

@@ -15,7 +15,8 @@ pub mod sock;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::str::FromStr;
 
-/// Parse `ip:port` into a v4 socket address. Used by clap value parsers.
+/// Parse `ip:port` into a v4 socket address. Used by clap value parsers
+/// where DNS resolution is undesirable (e.g. local bind addresses).
 pub fn parse_v4(s: &str) -> Result<SocketAddrV4, String> {
     SocketAddrV4::from_str(s).map_err(|e| format!("invalid ipv4 ip:port {s:?}: {e}"))
 }
@@ -23,6 +24,20 @@ pub fn parse_v4(s: &str) -> Result<SocketAddrV4, String> {
 /// Parse a bare IPv4 literal.
 pub fn parse_v4_ip(s: &str) -> Result<Ipv4Addr, String> {
     Ipv4Addr::from_str(s).map_err(|e| format!("invalid ipv4 {s:?}: {e}"))
+}
+
+/// Parse `ip:port` *or* `host:port` into a v4 socket address. Resolves DNS
+/// once, at clap parse time, picking the first IPv4 result. The relays
+/// then operate on the resolved address forever — no per-packet lookups.
+pub fn resolve_v4(s: &str) -> Result<SocketAddrV4, String> {
+    use std::net::{SocketAddr, ToSocketAddrs};
+    s.to_socket_addrs()
+        .map_err(|e| format!("could not resolve {s:?}: {e}"))?
+        .find_map(|sa| match sa {
+            SocketAddr::V4(v4) => Some(v4),
+            SocketAddr::V6(_) => None,
+        })
+        .ok_or_else(|| format!("no IPv4 address for {s:?}"))
 }
 
 /// Tunable that survives across binaries.

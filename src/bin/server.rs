@@ -1,5 +1,7 @@
 //! spocon-server — high-throughput Rust port of randconnect's server-side
-//! spoof path with spoofed source addresses on **both** legs:
+//! spoof path.
+//!
+//! With `--spoof-src` set (spoof mode):
 //!
 //! * UPLINK: spoofed UDP from the client arrives at `upstream-port`,
 //!   kernel doesn't care about source IP. We forward the payload as
@@ -10,6 +12,10 @@
 //!   socket, wrapped in a fresh IPv4+UDP header with `src=--spoof-src`
 //!   and `dst=--client`, and pushed out a raw `IP_HDRINCL` socket via
 //!   `sendmmsg`.
+//!
+//! Without `--spoof-src` (plain mode) the downlink is a regular UDP
+//! `sendto(--client)` from the same upstream socket bound to
+//! `0.0.0.0:--upstream-port` — no raw socket, no header crafting.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -24,29 +30,34 @@ use spocon::{
     info, logging,
     mmsg::{Batch, HEADER_ROOM},
     packet::SpoofTemplate,
-    parse_v4, raw, sock, vlog, Tuning,
+    raw, resolve_v4, sock, vlog, Tuning,
 };
 
 #[derive(Parser, Debug)]
 #[command(
     name = "spocon-server",
-    about = "spocon (Rust) server: receives spoofed UDP from a client, forwards to h_out, and spoofs replies back."
+    about = "spocon (Rust) server: receives UDP from a client, forwards to h_out, and replies back (spoofed when --spoof-src is set)."
 )]
 struct Args {
-    /// UDP port to bind on 0.0.0.0 for incoming (spoofed) packets from the client.
+    /// UDP port to bind on 0.0.0.0 for incoming packets from the client.
     #[arg(long)]
     upstream_port: u16,
 
-    /// ip:port of the real upstream protocol server (kcp/quic/...).
-    #[arg(long, value_parser = parse_v4)]
+    /// host:port of the real upstream protocol server (kcp/quic/...).
+    /// Resolved once at startup.
+    #[arg(long, value_parser = resolve_v4)]
     h_out: SocketAddrV4,
 
-    /// ip:port used as the source of spoofed downstream packets.
-    #[arg(long, value_parser = parse_v4)]
-    spoof_src: SocketAddrV4,
+    /// host:port used as the source of spoofed downstream packets. If
+    /// omitted, replies are sent as plain UDP from the upstream-port
+    /// socket (no spoofing) — useful when the path doesn't need it or
+    /// the box can't open a raw socket.
+    #[arg(long, value_parser = resolve_v4)]
+    spoof_src: Option<SocketAddrV4>,
 
-    /// Client public ip:port (port must match client's --wan-port).
-    #[arg(long, value_parser = parse_v4)]
+    /// Client public host:port (port must match client's --wan-port).
+    /// Resolved once at startup.
+    #[arg(long, value_parser = resolve_v4)]
     client: SocketAddrV4,
 
     /// recvmmsg / sendmmsg batch size.
@@ -105,7 +116,17 @@ fn main() -> io::Result<()> {
     }
     let h_out_local = sock::local_addr_v4(&h_out_sock)?;
 
-    let raw_sock = raw::open_raw_udp(args.sndbuf)?;
+    // Raw socket only needed when spoofing — plain mode runs without
+    // CAP_NET_RAW.
+    let raw_sock = match args.spoof_src {
+        Some(_) => Some(raw::open_raw_udp(args.sndbuf)?),
+        None => None,
+    };
+
+    let spoof_src_disp = args
+        .spoof_src
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "<none — plain UDP>".to_string());
 
     info!(
         "spocon-server (rust)\n\
@@ -121,7 +142,7 @@ fn main() -> io::Result<()> {
         args.upstream_port,
         args.h_out,
         h_out_local,
-        args.spoof_src,
+        spoof_src_disp,
         args.client,
         args.batch,
         args.bufsize,
@@ -143,13 +164,16 @@ fn main() -> io::Result<()> {
     // port is in the IP+UDP header we built). We still pass an address so
     // the kernel knows where to route; port is set to 0.
     let client_for_raw = sock::sockaddr_in_v4(SocketAddrV4::new(*args.client.ip(), 0));
+    let client_plain = sock::sockaddr_in_v4(args.client);
 
-    let template = SpoofTemplate::new(
-        args.spoof_src.ip().octets(),
-        args.spoof_src.port(),
-        args.client.ip().octets(),
-        args.client.port(),
-    );
+    let template_opt = args.spoof_src.map(|src| {
+        SpoofTemplate::new(
+            src.ip().octets(),
+            src.port(),
+            args.client.ip().octets(),
+            args.client.port(),
+        )
+    });
 
     // ---------- uplink thread: upstream UDP -> h_out UDP ----------
     let uplink = {
@@ -189,10 +213,11 @@ fn main() -> io::Result<()> {
             })?
     };
 
-    // ---------- downlink thread: h_out UDP -> raw spoofed IP -> client ----------
+    // ---------- downlink thread: h_out UDP -> (raw spoofed | plain UDP) -> client ----------
     let downlink = {
         let h_out_fd = h_out_sock.as_raw_fd();
-        let raw_fd = raw_sock.as_raw_fd();
+        let upstream_fd = upstream.as_raw_fd();
+        let raw_fd_opt = raw_sock.as_ref().map(|f| f.as_raw_fd());
         let batch_n = args.batch;
         let bufsize = args.bufsize;
         let no_csum = args.no_udp_csum;
@@ -203,27 +228,41 @@ fn main() -> io::Result<()> {
             .name("spocon-dn".to_string())
             .spawn(move || -> io::Result<()> {
                 let mut b = Batch::new(batch_n, bufsize);
+
+                // Spoof mode: recv into [HEADER_ROOM..] so the IP+UDP
+                // header is prepended in place, send on the raw socket.
+                // Plain mode: recv at offset 0 and `sendto(client)` from
+                // the upstream socket (src port = upstream_port, which
+                // is what the client expects to see replies from).
+                let spoof = template_opt.is_some();
+                let recv_off = if spoof { HEADER_ROOM } else { 0 };
+                let send_fd = raw_fd_opt.unwrap_or(upstream_fd);
+
                 loop {
-                    // Recv at offset HEADER_ROOM so we can prepend IP+UDP in place.
-                    b.prep_recv(HEADER_ROOM);
+                    b.prep_recv(recv_off);
                     let n = b.recvmmsg(h_out_fd)?;
                     if n == 0 {
                         continue;
                     }
                     for i in 0..n {
                         let plen = b.payload_len(i);
-                        let id = (ip_id.fetch_add(1, Ordering::Relaxed) & 0xFFFF) as u16;
-                        let total = template.build_in_place(b.slot_mut(i), plen, id, !no_csum);
-                        b.prep_send_slot(i, 0, total, &client_for_raw);
-                        vlog!(
-                            "[down] h_out -> spoof {} -> client {} {}B",
-                            spoof_src,
-                            client,
-                            plen
-                        );
+                        if let Some(ref tpl) = template_opt {
+                            let id = (ip_id.fetch_add(1, Ordering::Relaxed) & 0xFFFF) as u16;
+                            let total = tpl.build_in_place(b.slot_mut(i), plen, id, !no_csum);
+                            b.prep_send_slot(i, 0, total, &client_for_raw);
+                            vlog!(
+                                "[down] h_out -> spoof {} -> client {} {}B",
+                                spoof_src.unwrap(),
+                                client,
+                                plen
+                            );
+                        } else {
+                            b.prep_send_slot(i, 0, plen, &client_plain);
+                            vlog!("[down] h_out -> client {} {}B (plain)", client, plen);
+                        }
                     }
-                    if let Err(e) = b.sendmmsg(raw_fd, n) {
-                        eprintln!("raw sendmmsg: {e}");
+                    if let Err(e) = b.sendmmsg(send_fd, n) {
+                        eprintln!("downlink sendmmsg: {e}");
                     }
                 }
             })?
